@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Mic, StopCircle, Volume2 } from 'lucide-react';
 
 const backendURL = import.meta.env.VITE_BACKEND_URL || '';
 
 function useSpeech() {
-  const synthRef = useRef(window.speechSynthesis);
+  const synthRef = useRef(typeof window !== 'undefined' ? window.speechSynthesis : null);
   const [speaking, setSpeaking] = useState(false);
 
   const speak = (text) => {
-    if (!text) return;
+    if (!text || !synthRef.current) return;
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = 'en-US';
     utter.rate = 1.0;
@@ -20,6 +20,7 @@ function useSpeech() {
   };
 
   const stop = () => {
+    if (!synthRef.current) return;
     synthRef.current.cancel();
     setSpeaking(false);
   };
@@ -27,40 +28,40 @@ function useSpeech() {
   return { speak, stop, speaking };
 }
 
-function useRecorder() {
-  const mediaRef = useRef(null);
-  const chunksRef = useRef([]);
+function useSTT() {
+  const Recognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const recRef = useRef(null);
   const [recording, setRecording] = useState(false);
+  const [supported] = useState(Boolean(Recognition));
 
-  const start = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mediaRecorder = new MediaRecorder(stream);
-    mediaRef.current = mediaRecorder;
-    chunksRef.current = [];
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-    };
-    mediaRecorder.start();
+  const start = () => {
+    if (!Recognition) return false;
+    const rec = new Recognition();
+    rec.lang = 'en-US';
+    rec.interimResults = false;
+    rec.continuous = false;
+    recRef.current = rec;
     setRecording(true);
+    rec.start();
+    return true;
   };
 
-  const stop = async () => {
-    return new Promise((resolve) => {
-      const rec = mediaRef.current;
-      if (!rec) return resolve(null);
-      rec.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        setRecording(false);
-        resolve(blob);
-      };
-      rec.stop();
-    });
+  const stop = () => {
+    if (recRef.current) recRef.current.stop();
   };
 
-  return { start, stop, recording };
+  const onResult = (handler) => {
+    if (!recRef.current) return;
+    recRef.current.onresult = (e) => {
+      const last = e.results[e.results.length - 1];
+      const text = last[0]?.transcript?.trim();
+      handler(text || '');
+    };
+    recRef.current.onend = () => setRecording(false);
+    recRef.current.onerror = () => setRecording(false);
+  };
+
+  return { start, stop, onResult, recording, supported };
 }
 
 function VoiceTutor() {
@@ -68,7 +69,7 @@ function VoiceTutor() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([{ role: 'bot', text: 'Hi! I am your AI Buddy. Tell me something about your day.' }]);
   const { speak, stop, speaking } = useSpeech();
-  const { start, stop: stopRec, recording } = useRecorder();
+  const { start: sttStart, stop: sttStop, onResult, recording, supported } = useSTT();
   const [loading, setLoading] = useState(false);
 
   const send = async (text) => {
@@ -84,7 +85,11 @@ function VoiceTutor() {
       });
       const data = await res.json();
       const botText = data?.reply || 'I am here to help!';
-      setMessages((m) => [...m, { role: 'bot', text: botText }, ...(data?.suggestions?.length ? [{ role: 'tip', text: data.suggestions.join(' ') }] : [])]);
+      setMessages((m) => [
+        ...m,
+        { role: 'bot', text: botText },
+        ...(data?.suggestions?.length ? [{ role: 'tip', text: data.suggestions.join(' ') }] : []),
+      ]);
       speak(botText);
     } catch (e) {
       setMessages((m) => [...m, { role: 'bot', text: 'Unable to reach the tutor right now.' }]);
@@ -95,11 +100,14 @@ function VoiceTutor() {
 
   const handleRecordToggle = async () => {
     if (!recording) {
-      await start();
+      const started = sttStart();
+      if (started) {
+        onResult((text) => {
+          if (text) send(text);
+        });
+      }
     } else {
-      const blob = await stopRec();
-      // Basic speech-to-text using Web Speech API (non-server, free)
-      // Fallback: prompt user to type if API not available
+      sttStop();
     }
   };
 
@@ -141,7 +149,7 @@ function VoiceTutor() {
       <div className="mt-4 flex items-center gap-2">
         <button onClick={handleRecordToggle} className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg border ${recording ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white hover:bg-gray-50'}`}>
           {recording ? <StopCircle className="w-4 h-4"/> : <Mic className="w-4 h-4"/>}
-          {recording ? 'Stop' : 'Speak'}
+          {recording ? 'Stop' : (supported ? 'Speak' : 'Speak (not supported)')}
         </button>
         <input
           value={input}
